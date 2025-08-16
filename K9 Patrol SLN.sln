@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35931.197
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "K9 Patrol", "K9P_Project\K9 Patrol.csproj", "{B9E5D8D8-8D0D-4410-AD6E-45BA2ABC2E22}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		IL2CPP|Any CPU = IL2CPP|Any CPU
+		MONO|Any CPU = MONO|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B9E5D8D8-8D0D-4410-AD6E-45BA2ABC2E22}.IL2CPP|Any CPU.ActiveCfg = IL2CPP|Any CPU
+		{B9E5D8D8-8D0D-4410-AD6E-45BA2ABC2E22}.IL2CPP|Any CPU.Build.0 = IL2CPP|Any CPU
+		{B9E5D8D8-8D0D-4410-AD6E-45BA2ABC2E22}.MONO|Any CPU.ActiveCfg = MONO|Any CPU
+		{B9E5D8D8-8D0D-4410-AD6E-45BA2ABC2E22}.MONO|Any CPU.Build.0 = MONO|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {255069E9-DC49-4CB8-A766-15BAE9307A72}
+	EndGlobalSection
+EndGlobal
