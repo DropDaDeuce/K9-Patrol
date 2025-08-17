@@ -1,15 +1,15 @@
-﻿using Il2CppInterop.Runtime.Injection;
+﻿using Il2CppInterop.Runtime;
+using Il2CppInterop.Runtime.Injection;
+using Il2CppScheduleOne.DevUtilities; // + PlayerSingleton<>
+using Il2CppScheduleOne.ItemFramework; // + ItemSlot, ItemInstance, ELegalStatus
 using Il2CppScheduleOne.Law;
 using Il2CppScheduleOne.Map;
 using Il2CppScheduleOne.NPCs.Behaviour;
-using Il2CppScheduleOne.Police;
 using Il2CppScheduleOne.PlayerScripts; // + player type
-using Il2CppScheduleOne.DevUtilities; // + PlayerSingleton<>
-using Il2CppScheduleOne.ItemFramework; // + ItemSlot, ItemInstance, ELegalStatus
+using Il2CppScheduleOne.Police;
 using Il2CppScheduleOne.Product; // + ProductItemInstance
 using MelonLoader;
 using UnityEngine;
-using UnityEngine.Events;
 using UnityEngine.AI; // + officer agent control
 using Object = UnityEngine.Object;
 using Random = UnityEngine.Random;
@@ -69,6 +69,9 @@ namespace K9_Patrol
     // ---------------------- ENTRY ----------------------
     public sealed class Core : MelonMod
     {
+        public static string cfgDir;
+        public static Il2CppAssetBundle bundle;
+
         public override void OnInitializeMelon()
         {
             K9Config.Init();
@@ -77,6 +80,32 @@ namespace K9_Patrol
             ClassInjector.RegisterTypeInIl2Cpp<K9Manager>();
             ClassInjector.RegisterTypeInIl2Cpp<K9UnitController>();
             ClassInjector.RegisterTypeInIl2Cpp<K9NPC>();
+
+            try
+            {
+                // Use the utility class for consistent loading
+                bundle = TemplateUtils.AssetBundleUtils.LoadAssetBundle("K9 Patrol SLN.Assets.k9model.bundle");
+                
+                if (bundle != null)
+                {
+                    Logger.Msg("AssetBundle loaded successfully");
+                    // Optionally log available assets for debugging
+                    string[] assetNames = bundle.GetAllAssetNames();
+                    Logger.Debug($"Assets in bundle: {string.Join(", ", assetNames)}");
+
+                    var meshes = bundle.LoadAllAssets(Il2CppType.Of<Mesh>());
+                    MelonLoader.MelonLogger.Msg($"[K9] Mesh count in bundle: {meshes.Length}");
+                    for (int i = 0; i < meshes.Length; i++) Logger.Msg($"  mesh[{i}]={(meshes[i].TryCast<Mesh>()?.name ?? "<null>")}");
+                }
+                else
+                {
+                    Logger.Error("Failed to load AssetBundle - returned null");
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"Failed to load AssetBundle: {e}");
+            }
 
             Logger.Msg("K9 Patrol mod initialized.");
         }
@@ -100,6 +129,7 @@ namespace K9_Patrol
         private readonly List<K9UnitController> _units = [];
         private float _checkTimer = 0f;
         private const float CHECK_INTERVAL = 5f;
+        private const float maxDistance = 100f;
 
         private static void Start()
         {
@@ -131,14 +161,16 @@ namespace K9_Patrol
             }
         }
 
-        private static PoliceOfficer FindClosestOfficer(Vector3 pos, float maxDist)
+        public static PoliceOfficer FindClosestOfficer(Vector3 pos)
         {
+            Logger.Debug($"Finding closest officer to position {pos} with max distance");
             var all = Object.FindObjectsOfType<PoliceOfficer>(true);
-            float best = maxDist;
+            float best = maxDistance;
             PoliceOfficer pick = null;
             foreach (var o in all)
             {
-                if (o == null || o.transform == null) continue;
+
+                if (o == null || o.transform == null || IsOfficerInStation(o)) continue;
                 float d = Vector3.Distance(pos, o.transform.position);
                 if (d < best)
                 {
@@ -158,6 +190,19 @@ namespace K9_Patrol
                 int officersToSpawn = K9Config.MaxUnitCount - currentK9OfficerCount;
                 SpawnOfficersWithK9InRandomRegions(officersToSpawn);
             }
+        }
+
+        public static bool IsOfficerInStation(PoliceOfficer officer)
+        {
+            if (officer == null || officer.transform == null) return false;
+            foreach (var station in Object.FindObjectsOfType<PoliceStation>())
+            {
+                if (station.OfficerPool.Contains(officer))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void SpawnOfficersWithK9InRandomRegions(int count)
@@ -216,7 +261,8 @@ namespace K9_Patrol
                             foreach (var m in group.Members)
                             {
                                 var asOfficer = m as PoliceOfficer;
-                                if (asOfficer != null)
+
+                                if (asOfficer != null && !IsOfficerInStation(asOfficer))
                                 {
                                     officer = asOfficer;
                                     break;
@@ -226,7 +272,7 @@ namespace K9_Patrol
                     }
 
                     // Fallback: find nearby existing officer
-                    officer ??= FindClosestOfficer(spawnPosition, 50f);
+                    officer ??= FindClosestOfficer(spawnPosition);
                     if (officer == null)
                     {
                         Logger.Warning("Failed to acquire officer for K9 unit – retrying.");
@@ -276,11 +322,11 @@ namespace K9_Patrol
         public K9NPC K9DogNPC { get; private set; }
 
         private readonly Dictionary<int, float> _lastSearchAt = [];
-        private readonly float _lastCheck;
         private bool _ready;
         private float _setupTimer = 0f;
 
         // Detection state
+
         private Player _pursuitTarget;
         private float _detectionTick;
         private bool _isSearchListenerActive;
@@ -355,22 +401,10 @@ namespace K9_Patrol
 
                 K9DogNPC = Dog.AddComponent<K9NPC>();
                 K9DogNPC.Initialize(Officer, this);
-
-                SetLayerRecursively(Dog, 0);
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error creating K9 dog: {ex.Message}");
-            }
-        }
-
-        private static void SetLayerRecursively(GameObject obj, int layer)
-        {
-            obj.layer = layer;
-            foreach (Transform child in obj.transform)
-            {
-                if (child == null) continue;
-                SetLayerRecursively(child.gameObject, layer);
             }
         }
 
@@ -403,7 +437,7 @@ namespace K9_Patrol
 
                 float d = Vector3.Distance(Officer.transform.position, p.transform.position);
                 if (d <= sniffRadius)
-                    Logger.Debug($"Sniff: candidate player {p.GetInstanceID()} at {d:F1}m (owner={p.IsOwner}, local={(p == Player.Local)})");
+                    //Logger.Debug($"Sniff: candidate player {p.GetInstanceID()} at {d:F1}m (owner={p.IsOwner}, local={(p == Player.Local)})");
 
                 if (d > bestDist) continue;
 
@@ -413,7 +447,7 @@ namespace K9_Patrol
 
             if (best == null)
             {
-                Logger.Debug("Sniff: no candidates within radius.");
+                //Logger.Debug("Sniff: no candidates within radius.");
                 return;
             }
 

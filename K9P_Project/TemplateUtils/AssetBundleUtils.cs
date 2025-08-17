@@ -19,7 +19,7 @@ namespace TemplateUtils
         {
             try
             {
-                string streamPath = $"{typeof(Core).Namespace}.Assets.{bundleFileName}";
+                string streamPath = bundleFileName;
                 Stream bundleStream = melonAssembly.Assembly.GetManifestResourceStream($"{streamPath}");
                 if (bundleStream == null)
                 {

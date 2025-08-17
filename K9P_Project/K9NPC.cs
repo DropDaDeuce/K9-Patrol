@@ -1,8 +1,12 @@
-using System;
+using Il2CppInterop.Runtime;
 using Il2CppScheduleOne.Police;
 using MelonLoader;
+using MelonLoader.Utils;
+using System;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
+using Object = UnityEngine.Object;
 
 namespace K9_Patrol
 {
@@ -37,6 +41,9 @@ namespace K9_Patrol
         private bool _initialized;
         private bool _started;
 
+        public Animator animator;
+        public GameObject dogModel;
+
         public void Initialize(PoliceOfficer officer, K9UnitController controller)
         {
             Officer = officer;
@@ -64,7 +71,7 @@ namespace K9_Patrol
             }
 
             // Ensure a visible renderer exists (placeholder if no prefab/model)
-            EnsureVisual();
+            LoadBundle();
 
             lastPosition = transform.position;
             _initialized = true;
@@ -90,32 +97,118 @@ namespace K9_Patrol
             _agent.avoidancePriority = 60;  // yield to officers (Unity: lower value = higher priority)
         }
 
-        private void EnsureVisual()
+        private void LoadBundle()
         {
-            if (GetComponentInChildren<Renderer>() != null) return;
-
-            var visual = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-            visual.name = "Visual";
-            visual.transform.SetParent(transform, false);
-            visual.transform.localPosition = Vector3.zero;
-            visual.transform.localScale = new Vector3(0.3f, 0.35f, 0.8f);
-            // Lay the capsule “horizontally” a bit to look less like a pillar
-            visual.transform.localRotation = Quaternion.Euler(0f, 0f, 0f);
-
-            var col = visual.GetComponent<Collider>();
-            if (col != null) Destroy(col);
+            if (transform.childCount > 0)
+                return;
 
             try
             {
-                var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
-                if (shader != null)
+                if (Core.bundle == null)
                 {
-                    var mat = new Material(shader) { color = new Color(0.35f, 0.25f, 0.15f, 1f) };
-                    var mr = visual.GetComponent<Renderer>();
-                    mr.sharedMaterial = mat;
+                    Logger.Error("Dog model bundle not loaded");
+                    return;
                 }
+
+                GameObject dogModelPrefab = Core.bundle.LoadAsset<GameObject>("Assets/Bublisher/3D Stylized Animated Dogs Kit/Prefabs/K9Model.prefab");
+                Logger.Debug($"Loading dog model from bundle: {dogModelPrefab?.name ?? "null"}");
+
+                if (dogModelPrefab == null)
+                {
+                    Logger.Error("Failed to load dog model from asset bundle");
+                    string[] assetNames = Core.bundle.GetAllAssetNames();
+                    Logger.Debug($"Available assets: {string.Join(", ", assetNames)}");
+                    return;
+                }
+
+                Texture2D albedo = Core.bundle.LoadAsset<Texture2D>("Assets/Bublisher/3D Stylized Animated Dogs Kit/Textures/3D Stylized Animated Dogs Kit - BaseColor.png");
+                Texture2D normal = Core.bundle.LoadAsset<Texture2D>("Assets/Bublisher/3D Stylized Animated Dogs Kit/Textures/3D Stylized Animated Dogs Kit - Normal.png");
+                Texture2D metallic = Core.bundle.LoadAsset<Texture2D>("Assets/Bublisher/3D Stylized Animated Dogs Kit/Textures/3D Stylized Animated Dogs Kit - MetallicSmoothness.png");
+
+                var K9Material = MakeMaterial(albedo, normal, metallic);
+
+                if (K9Material == null)
+                {
+                    Logger.Error($"Material asset loading failed. K9Material: {K9Material != null}, Shader: {K9Material.shader != null}");
+                    return;
+                }
+
+                Logger.Debug($"K9Material created: {K9Material.name}, Shader: {K9Material.shader.name}");
+
+                dogModel = GameObject.Instantiate(dogModelPrefab);
+                dogModel.transform.SetParent(transform, worldPositionStays: false);
+                dogModel.transform.localPosition = Vector3.zero;
+                dogModel.transform.localRotation = Quaternion.identity;
+                dogModel.transform.localScale = new Vector3(1.5f, 1.5f, 1.5f);
+
+                var skinnedMeshRenderer = dogModel.GetComponentInChildren<SkinnedMeshRenderer>();
+                if (skinnedMeshRenderer != null)
+                {
+                    skinnedMeshRenderer.material = K9Material;
+                }
+
+                animator = dogModel.GetComponent<Animator>();
+
+                SetLayerRecursively(dogModel.transform, LayerMask.NameToLayer("NPC"));
+
+                Logger.Debug("Dog model loaded successfully");
             }
-            catch { /* ignore */ }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading dog model: {ex.Message}");
+            }
+        }
+
+        private static Material MakeMaterial(Texture2D albedo, Texture2D normal, Texture2D metallic)
+        {
+            if (albedo == null) return null;
+            var newMaterial = new Material(FindShader())
+            {
+                name = albedo.name,
+                mainTexture = albedo,
+                
+            };
+            newMaterial.SetTexture("_MainTex", albedo);
+            newMaterial.SetTexture("_BumpMap", normal);
+            newMaterial.SetTexture("_MetallicGlossMap", metallic);
+            return newMaterial;
+        }
+
+        private static Shader FindShader()
+        {
+            // Try to find the Standard shader first
+            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            if (shader != null)
+                return shader;
+            // Fallback to Universal Render Pipeline Lit shader
+            shader = Shader.Find("Standard");
+            if (shader != null)
+                return shader;
+            // Fallback to Unlit/Texture shader
+            shader = Shader.Find("Unlit/Texture");
+            if (shader != null)
+                return shader;
+            // Fallback to Default-Diffuse shader
+            shader = Shader.Find("Default-Diffuse");
+            if (shader != null)
+                return shader;
+            // Last resort: Diffuse shader
+            return Shader.Find("Diffuse");
+        }
+
+        private static void SetLayerRecursively(Transform root, int layer)
+        {
+            if (root == null) return;
+
+            root.gameObject.layer = layer;
+
+            // Avoid foreach over root to dodge IL2CPP’s non-generic enumerator issues
+            int count = root.childCount;
+            for (int i = 0; i < count; i++)
+            {
+                var child = root.GetChild(i);
+                SetLayerRecursively(child, layer);
+            }
         }
 
         private void StartBehaviorUpdate()
@@ -130,6 +223,14 @@ namespace K9_Patrol
         {
             if (!_initialized || Officer == null || Officer.Health == null || Officer.Health.IsDead)
                 return;
+
+            if (K9Manager.IsOfficerInStation(Officer))
+            {
+                CancelInvoke(nameof(UpdateBehavior));
+                Officer = K9Manager.FindClosestOfficer(transform.position);
+                InvokeRepeating(nameof(UpdateBehavior), 1f, BehaviorTickInterval);
+                return;
+            }
 
             pathUpdateTimer += BehaviorTickInterval;
             if (pathUpdateTimer >= updatePathInterval)
@@ -157,7 +258,7 @@ namespace K9_Patrol
 
             if (_agent.isOnNavMesh)
             {
-                _agent.speed = Officer.movement.Agent.speed;
+                _agent.speed = Officer.movement.Agent.speed;               
                 _agent.SetDestination(target);
             }
 

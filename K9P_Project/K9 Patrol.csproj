@@ -942,7 +942,7 @@
 		<Compile Include="TemplateUtils\AssetBundleUtils.cs" />
 		<Folder Include="Libs\" />
 		<!--Uncomment if with assetbundle-->
-		<!--<EmbeddedResource Include="Assets\your.assetbundle" />-->
+		<EmbeddedResource Include="Assets\k9model.bundle" />
 	</ItemGroup>
 
 	<!--Packages-->
@@ -952,6 +952,7 @@
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>
 	</ItemGroup>
+  
 	<!--Publicizer Entries-->
 	<ItemGroup Condition="'$(Configuration)' == 'IL2CPP'">
 		<Publicize Include="Assembly-CSharp:Il2CppScheduleOne.NPCs.NPC.Start" />
