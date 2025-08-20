@@ -1,18 +1,22 @@
-﻿using Il2CppInterop.Runtime;
+﻿using Il2CppFishNet.Object;
+using Il2CppFishNet.Managing;
+using Il2CppFishNet.Component.Transforming;
+using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.Injection;
 using Il2CppScheduleOne.DevUtilities; // + PlayerSingleton<>
 using Il2CppScheduleOne.ItemFramework; // + ItemSlot, ItemInstance, ELegalStatus
 using Il2CppScheduleOne.Law;
 using Il2CppScheduleOne.Map;
 using Il2CppScheduleOne.NPCs.Behaviour;
+using Il2CppScheduleOne.NPCs; // + NPCMovement
 using Il2CppScheduleOne.PlayerScripts; // + player type
 using Il2CppScheduleOne.Police;
 using Il2CppScheduleOne.Product; // + ProductItemInstance
 using MelonLoader;
 using UnityEngine;
-using UnityEngine.AI; // + officer agent control
 using Object = UnityEngine.Object;
 using Random = UnityEngine.Random;
+using System; // For Exception
 
 [assembly: MelonInfo(typeof(K9_Patrol.Core), "K9 Patrol", "1.0.0", "DropDaDeuce")]
 [assembly: MelonGame("TVGS", "Schedule I")]
@@ -29,6 +33,7 @@ namespace K9_Patrol
         internal static MelonPreferences_Entry<float> RecheckInterval;
         internal static MelonPreferences_Entry<float> SearchCooldown;
         internal static MelonPreferences_Entry<bool> DebugLogging;
+        internal static MelonPreferences_Entry<float> PursuitSpeedMultiplier;
 
         public static int MaxUnitCount => UnitCount.Value;
 
@@ -40,7 +45,9 @@ namespace K9_Patrol
             SearchRadius = Cat.CreateEntry("SearchRadius", 6f);
             RecheckInterval = Cat.CreateEntry("RecheckInterval", 0.2f);
             SearchCooldown = Cat.CreateEntry("SearchCooldown", 30f);
-            DebugLogging = Cat.CreateEntry("DebugLogging", true);
+            DebugLogging = Cat.CreateEntry("DebugLogging", false);
+            PursuitSpeedMultiplier = Cat.CreateEntry("PursuitSpeedMultiplier", 1.25f); // mild, temporary boost while tracking
+
             MelonPreferences.Save();
         }
     }
@@ -126,10 +133,15 @@ namespace K9_Patrol
     // ---------------------- MANAGER ----------------------
     public sealed class K9Manager(IntPtr ptr) : MonoBehaviour(ptr)
     {
-        private readonly List<K9UnitController> _units = [];
+        private static readonly List<K9UnitController> _units = [];
         private float _checkTimer = 0f;
         private const float CHECK_INTERVAL = 5f;
         private const float maxDistance = 100f;
+
+        // --- Player Cache ---
+        public static readonly List<Player> PlayerCache = [];
+        private float _playerCacheTimer = 0f;
+        private const float PLAYER_CACHE_INTERVAL = 1.0f; // Refresh player list once per second
 
         private static void Start()
         {
@@ -138,6 +150,15 @@ namespace K9_Patrol
 
         private void Update()
         {
+            // Update the player cache periodically
+            _playerCacheTimer += Time.deltaTime;
+            if (_playerCacheTimer >= PLAYER_CACHE_INTERVAL)
+            {
+                _playerCacheTimer = 0f;
+                PlayerCache.Clear();
+                PlayerCache.AddRange(Object.FindObjectsOfType<Player>(true));
+            }
+
             // Remove disposed/null/dead units before counting or spawning
             PruneUnits();
 
@@ -156,6 +177,12 @@ namespace K9_Patrol
                 var unit = _units[i];
                 if (unit == null || unit.Officer == null || unit.Officer.Health == null || unit.Officer.Health.IsDead)
                 {
+                    if (unit != null)
+                    {
+                        // Destroy the GameObject to prevent memory leaks.
+                        // This will trigger OnDestroy on the K9UnitController, cleaning up the dog.
+                        Object.Destroy(unit.gameObject);
+                    }
                     _units.RemoveAt(i);
                 }
             }
@@ -163,18 +190,22 @@ namespace K9_Patrol
 
         public static PoliceOfficer FindClosestOfficer(Vector3 pos)
         {
-            Logger.Debug($"Finding closest officer to position {pos} with max distance");
-            var all = Object.FindObjectsOfType<PoliceOfficer>(true);
-            float best = maxDistance;
+            //Logger.Debug($"Finding closest officer to position {pos} using static list.");
+            float bestDistSqr = maxDistance * maxDistance; // Use squared distance for efficiency
             PoliceOfficer pick = null;
-            foreach (var o in all)
-            {
 
-                if (o == null || o.transform == null || IsOfficerInStation(o)) continue;
-                float d = Vector3.Distance(pos, o.transform.position);
-                if (d < best)
+            // Create a set of assigned officers for a fast lookup.
+            var assignedOfficers = new HashSet<PoliceOfficer>(_units.Select(u => u.Officer));
+
+            // Use the game's own static list of officers for high performance.
+            foreach (var o in PoliceOfficer.Officers)
+            {
+                if (o == null || o.transform == null || !o.isActiveAndEnabled || assignedOfficers.Contains(o) || IsOfficerInStation(o)) continue;
+
+                float dSqr = (pos - o.transform.position).sqrMagnitude;
+                if (dSqr < bestDistSqr)
                 {
-                    best = d;
+                    bestDistSqr = dSqr;
                     pick = o;
                 }
             }
@@ -183,8 +214,12 @@ namespace K9_Patrol
 
         private void PeriodicOfficerCheck()
         {
-            int currentK9OfficerCount = _units.Count;
+            // Only the server (or offline/SP) should spawn K9 units
+            var net = Object.FindObjectOfType<NetworkManager>(true);
+            bool isServer = (net == null) || net.IsServer;
+            if (!isServer) return;
 
+            int currentK9OfficerCount = _units.Count;
             if (currentK9OfficerCount < K9Config.MaxUnitCount && Map.Instance != null && Map.Instance.Regions != null)
             {
                 int officersToSpawn = K9Config.MaxUnitCount - currentK9OfficerCount;
@@ -194,10 +229,12 @@ namespace K9_Patrol
 
         public static bool IsOfficerInStation(PoliceOfficer officer)
         {
-            if (officer == null || officer.transform == null) return false;
-            foreach (var station in Object.FindObjectsOfType<PoliceStation>())
+            if (officer == null) return false;
+            
+            // CRITICAL FIX: Use the game's static list instead of FindObjectsOfType.
+            foreach (var station in PoliceStation.PoliceStations)
             {
-                if (station.OfficerPool.Contains(officer))
+                if (station != null && station.OfficerPool.Contains(officer))
                 {
                     return true;
                 }
@@ -211,18 +248,33 @@ namespace K9_Patrol
             int spawnedCount = 0;
             int attempts = 0;
 
-            var stations = Object.FindObjectsOfType<PoliceStation>();
-            if (stations == null || stations.Length == 0)
+            // OPTIMIZATION: Use the static list here as well.
+            var stations = PoliceStation.PoliceStations;
+            if (stations == null || stations.Count == 0)
             {
                 Logger.Warning("No police stations found – cannot spawn K9 officers.");
                 return;
+            }
+
+            // OPTIMIZATION: Find routes only once outside the loop.
+            var routes = Object.FindObjectsOfType<FootPatrolRoute>();
+            var validRoutes = new List<FootPatrolRoute>();
+            if (routes != null)
+            {
+                foreach (var route in routes)
+                {
+                    if (route != null && route.Waypoints != null && route.StartWaypointIndex >= 0 && route.StartWaypointIndex < route.Waypoints.Length)
+                    {
+                        validRoutes.Add(route);
+                    }
+                }
             }
 
             while (spawnedCount < count && attempts < count * 3)
             {
                 attempts++;
 
-                int stationIndex = Random.Range(0, stations.Length);
+                int stationIndex = Random.Range(0, stations.Count);
                 PoliceStation selectedStation = stations[stationIndex];
                 if (selectedStation == null) continue;
 
@@ -231,24 +283,11 @@ namespace K9_Patrol
                 try
                 {
                     // Routes
-                    var routes = Object.FindObjectsOfType<FootPatrolRoute>();
                     FootPatrolRoute selectedRoute = null;
-
-                    if (routes != null && routes.Length > 0)
+                    if (validRoutes.Count > 0)
                     {
-                        var validRoutes = new List<FootPatrolRoute>();
-                        foreach (var route in routes)
-                        {
-                            if (route == null || route.Waypoints == null) continue;
-                            if (route.StartWaypointIndex < 0 || route.StartWaypointIndex >= route.Waypoints.Length) continue;
-                            validRoutes.Add(route);
-                        }
-
-                        if (validRoutes.Count > 0)
-                        {
-                            int randomRouteIndex = Random.Range(0, validRoutes.Count);
-                            selectedRoute = validRoutes[randomRouteIndex];
-                        }
+                        int randomRouteIndex = Random.Range(0, validRoutes.Count);
+                        selectedRoute = validRoutes[randomRouteIndex];
                     }
 
                     // Try to get an officer via patrol
@@ -278,18 +317,6 @@ namespace K9_Patrol
                         Logger.Warning("Failed to acquire officer for K9 unit – retrying.");
                         continue;
                     }
-
-                    // Avoid duplicate K9 for the same officer
-                    bool hasK9 = false;
-                    foreach (var k9 in _units)
-                    {
-                        if (k9 != null && k9.Officer != null && k9.Officer.GetInstanceID() == officer.GetInstanceID())
-                        {
-                            hasK9 = true;
-                            break;
-                        }
-                    }
-                    if (hasK9) continue;
 
                     // Create and initialize K9 unit
                     var unitGo = new GameObject($"K9Unit_{officer.GetInstanceID()}");
@@ -326,10 +353,14 @@ namespace K9_Patrol
         private float _setupTimer = 0f;
 
         // Detection state
-
-        private Player _pursuitTarget;
+        internal Player _pursuitTarget;
         private float _detectionTick;
         private bool _isSearchListenerActive;
+
+        // NACops-inspired: temporary movement boost while tracking
+        private bool _speedBoostApplied;
+        private float _origWalkSpeed;
+        private float _origRunSpeed;
 
         public void Initialize(PoliceOfficer officer)
         {
@@ -337,6 +368,7 @@ namespace K9_Patrol
             name = $"K9_ofc_{officer.GetInstanceID()}";
             CreateDog();
 
+            // No need to add NetworkedK9 or NetworkObject to the unit root
             _setupTimer = 0.25f;
         }
 
@@ -352,6 +384,15 @@ namespace K9_Patrol
             }
 
             if (!_ready || Officer == null) return;
+
+            // If the officer has entered a station, despawn this entire K9 unit.
+            // The K9Manager will then spawn a new one to replace it.
+            if (K9Manager.IsOfficerInStation(Officer))
+            {
+                Logger.Debug($"Officer {Officer.GetInstanceID()} entered station. Despawning K9 unit.");
+                Object.Destroy(gameObject); // This destroys the K9UnitController and its child K9NPC.
+                return;
+            }
 
             // Periodic detection
             _detectionTick += Time.deltaTime;
@@ -399,6 +440,19 @@ namespace K9_Patrol
 
                 Logger.Debug($"K9 NPC created at position: {Dog.transform.position}");
 
+                // Add networking to the dog itself
+                var nob = Dog.GetComponent<NetworkObject>() ?? Dog.AddComponent<NetworkObject>();
+                var nt = Dog.GetComponent<NetworkTransform>() ?? Dog.AddComponent<NetworkTransform>();
+                // Defaults are fine; server authoritative transform
+
+                // Spawn on the server
+                var net = Object.FindObjectOfType<NetworkManager>(true);
+                if (net == null || net.IsServer)
+                {
+                    if (net != null && !nob.IsSpawned)
+                        net.ServerManager.Spawn(nob);
+                }
+
                 K9DogNPC = Dog.AddComponent<K9NPC>();
                 K9DogNPC.Initialize(Officer, this);
             }
@@ -412,12 +466,27 @@ namespace K9_Patrol
         {
             if (Dog != null)
             {
-                try { Destroy(Dog); } catch { /* ignore */ }
+                // The dog is a networked object. Its destruction is managed by the server.
+                // When this K9UnitController's GameObject is destroyed on the server,
+                // the child Dog object is also destroyed, and FishNet handles the despawn.
+                // No explicit despawn call is needed here, but we ensure it's null.
                 Dog = null;
                 K9DogNPC = null;
             }
             // Ensure listeners are removed if the object is destroyed
             RemoveSearchListeners();
+
+            // Restore any temporary movement changes
+            if (_speedBoostApplied && Officer != null)
+            {
+                try
+                {
+                    Officer.Movement.WalkSpeed = _origWalkSpeed;
+                    Officer.Movement.RunSpeed = _origRunSpeed;
+                }
+                catch { /* ignore */ }
+                _speedBoostApplied = false;
+            }
         }
 
         // ---------------------- Detection & Actions ----------------------
@@ -427,49 +496,113 @@ namespace K9_Patrol
             if (Officer == null || Officer.Health == null || Officer.Health.IsDead || _pursuitTarget != null) return;
 
             float sniffRadius = K9Config.SniffRadius.Value;
-            float bestDist = sniffRadius;
+            float rSqr = sniffRadius * sniffRadius;
+
+            float bestDistSqr = rSqr;   // only accept candidates within radius
             Player best = null;
 
-            var players = Object.FindObjectsOfType<Player>(true);
-            foreach (var p in players)
+            _pursuitTarget = null;
+            if (K9DogNPC != null) K9DogNPC.PursuitTarget = null;
+
+            foreach (var p in K9Manager.PlayerCache)
             {
                 if (p == null || p.transform == null) continue;
 
-                float d = Vector3.Distance(Officer.transform.position, p.transform.position);
-                if (d <= sniffRadius)
-                    //Logger.Debug($"Sniff: candidate player {p.GetInstanceID()} at {d:F1}m (owner={p.IsOwner}, local={(p == Player.Local)})");
 
-                if (d > bestDist) continue;
+                float dSqr = (Officer.transform.position - p.transform.position).sqrMagnitude;
 
-                bestDist = d;
+                // HARD FILTER: ignore anyone outside sniff radius
+                if (dSqr > rSqr) continue;
+
+                if (dSqr >= bestDistSqr) continue;
+
+                bestDistSqr = dSqr;
                 best = p;
             }
 
             if (best == null)
             {
                 //Logger.Debug("Sniff: no candidates within radius.");
+                SetTracking(false);
                 return;
             }
 
             if (!HasDrugsInToolbelt(best))
             {
-                Logger.Debug($"Sniff: player {best.GetInstanceID()} has no items of interest (or inventory not visible).");
+                SetTracking(false);
                 return;
             }
+
+            SetTracking(true);
 
             int pid = best.GetInstanceID();
             float now = Time.time;
-
-            if (_lastSearchAt.TryGetValue(pid, out var lastSearch) && (now - lastSearch) < K9Config.SearchCooldown.Value)
-            {
-                Logger.Debug($"Sniff: pursuit on player {pid} suppressed by cooldown ({now - lastSearch:F1}s).");
+            if (_lastSearchAt.TryGetValue(pid, out var last) && (now - last) < K9Config.SearchCooldown.Value)
                 return;
-            }
 
+            // Avoid starting anything if a search is already pending for the player
+            if (best.CrimeData != null && best.CrimeData.BodySearchPending)
+                return;
+
+            if (bestDistSqr > rSqr) return;
             _pursuitTarget = best;
-            Logger.Debug($"Sniff: flagged player {pid} at {bestDist:F1}m. Officer pursuing.");
-
+            if (K9DogNPC != null) K9DogNPC.PursuitTarget = _pursuitTarget.transform; // Set the dog's target
+            
             EnsureOfficerAgentAndSetDestination(best.transform.position);
+        }
+
+        public void SetTracking(bool tracking)
+        {
+            if (K9DogNPC != null) K9DogNPC.isTracking = tracking;
+
+            // Temporary speed boost while tracking (restored when tracking ends)
+            if (Officer != null && Officer.Movement != null)
+            {
+                try
+                {
+                    if (tracking && !_speedBoostApplied)
+                    {
+                        _origWalkSpeed = Officer.Movement.WalkSpeed;
+                        _origRunSpeed = Officer.Movement.RunSpeed;
+
+                        float mult = Mathf.Max(1f, K9Config.PursuitSpeedMultiplier.Value);
+                        Officer.Movement.WalkSpeed = _origWalkSpeed * mult;
+                        Officer.Movement.RunSpeed = _origRunSpeed * mult;
+                        _speedBoostApplied = true;
+                    }
+                    else if (!tracking && _speedBoostApplied)
+                    {
+                        Officer.Movement.WalkSpeed = _origWalkSpeed;
+                        Officer.Movement.RunSpeed = _origRunSpeed;
+                        _speedBoostApplied = false;
+                    }
+                }
+                catch { /* ignore */ }
+            }
+        }
+
+        private void EnsureOfficerAgentAndSetDestination(Vector3 pos)
+        {
+            try
+            {
+                if (Officer?.Movement != null && Officer.Movement.CanMove())
+                {
+                    if (Officer.Movement.GetClosestReachablePoint(pos, out var reachable) && reachable != Vector3.zero)
+                    {
+                        Officer.Movement.SetAgentType(NPCMovement.EAgentType.IgnoreCosts);
+                        Officer.Movement.SetDestination(reachable);
+                        Logger.Debug($"Nav: set destination via NPCMovement {reachable}.");
+                    }
+                    else
+                    {
+                        Logger.Debug("Nav: no reachable point via NPCMovement.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"EnsureOfficerAgentAndSetDestination failed: {ex.Message}");
+            }
         }
 
         private void MaintainPursuit()
@@ -478,43 +611,63 @@ namespace K9_Patrol
             {
                 Logger.Debug("Pursuit: target lost, stopping.");
                 _pursuitTarget = null;
+                if (K9DogNPC != null) K9DogNPC.PursuitTarget = null;
+                SetTracking(false);
                 RemoveSearchListeners();
                 return;
             }
 
-            Vector3 targetPos = _pursuitTarget.transform.position;
-            var agent = Officer.gameObject.GetComponent<NavMeshAgent>();
-            if (agent != null && agent.enabled)
+            if (_pursuitTarget.CrimeData != null && _pursuitTarget.CrimeData.BodySearchPending)
             {
-                if (agent.isOnNavMesh)
-                {
-                    agent.SetDestination(targetPos);
-                    Logger.Debug($"Pursuit: updating destination to {targetPos}.");
-                }
-                else
-                {
-                    Logger.Debug("Pursuit: officer agent not on NavMesh.");
-                }
-            }
-            else
-            {
-                Logger.Debug("Pursuit: officer NavMeshAgent missing or disabled.");
+                Logger.Debug("Pursuit: body search already pending, stopping.");
+                _pursuitTarget = null;
+                if (K9DogNPC != null) K9DogNPC.PursuitTarget = null;
+                SetTracking(false);
+                RemoveSearchListeners();
+                return;
             }
 
-            float dist = Vector3.Distance(Officer.transform.position, targetPos);
+            float rSqr = K9Config.SniffRadius.Value * K9Config.SniffRadius.Value;
+            float dSqr = (Officer.transform.position - _pursuitTarget.transform.position).sqrMagnitude;
+            if (dSqr > rSqr) { _pursuitTarget = null; SetTracking(false); return; }
+
+            // Server-authoritative movement using Movement API
+            try
+            {
+                if (Officer.Movement != null && Officer.Movement.CanMove())
+                {
+                    var targetPos = _pursuitTarget.transform.position;
+                    if (Officer.Movement.GetClosestReachablePoint(targetPos, out var reachable) && reachable != Vector3.zero)
+                    {
+                        Officer.Movement.SetAgentType(NPCMovement.EAgentType.IgnoreCosts);
+                        Officer.Movement.SetDestination(reachable);
+                    }
+                }
+            }
+            catch { /* ignore */ }
+
+            float dist = Vector3.Distance(Officer.transform.position, _pursuitTarget.transform.position);
             if (dist <= K9Config.SearchRadius.Value)
             {
                 int pid = _pursuitTarget.GetInstanceID();
+
                 if (!_lastSearchAt.TryGetValue(pid, out var last) || (Time.time - last) >= K9Config.SearchCooldown.Value)
                 {
-                    Logger.Debug($"Search: within radius ({dist:F1}m). Initiating StartBodySearchInvestigation for player {pid}.");
-                    Officer.BeginBodySearch(_pursuitTarget.NetworkObject);
+                    if (Officer.BodySearchBehaviour != null && Officer.BodySearchBehaviour.Active)
+                        return;
+
+                    Logger.Debug($"Search: within radius ({dist:F1}m). Initiating body search for player {pid}.");
+
+                    // Game-provided networked action
+                    Officer.BeginBodySearch_Networked(_pursuitTarget.NetworkObject);
+
                     AddSearchListeners();
                 }
                 else
                 {
-                    Logger.Debug($"Search: cooldown active for player {pid} ({Time.time - last:F1}s).");
-                    _pursuitTarget = null; // Cooldown is active, so stop pursuing.
+                    _pursuitTarget = null;
+                    if (K9DogNPC != null) K9DogNPC.PursuitTarget = null;
+                    SetTracking(false);
                 }
             }
         }
@@ -544,7 +697,12 @@ namespace K9_Patrol
         // Common implementation 
         private void HandleSearchComplete()
         {
-            if (_pursuitTarget == null) return;
+            if (_pursuitTarget == null)
+            {
+                // Restore movement even if target disappeared
+                SetTracking(false);
+                return;
+            }
 
             int pid = _pursuitTarget.GetInstanceID();
             _lastSearchAt[pid] = Time.time;
@@ -552,25 +710,9 @@ namespace K9_Patrol
 
             RemoveSearchListeners();
             _pursuitTarget = null;
-        }
 
-        private void EnsureOfficerAgentAndSetDestination(Vector3 pos)
-        {
-            var agent = Officer.gameObject.GetComponent<NavMeshAgent>() ?? Officer.gameObject.AddComponent<NavMeshAgent>();
-            if (!agent.enabled)
-            {
-                Logger.Debug("Nav: officer agent not enabled.");
-            }
-
-            if (agent.enabled && agent.isOnNavMesh)
-            {
-                agent.SetDestination(pos);
-                Logger.Debug($"Nav: set initial destination {pos}.");
-            }
-            else
-            {
-                Logger.Debug("Nav: could not set destination (not on NavMesh).");
-            }
+            // Stop tracking and restore speeds
+            SetTracking(false);
         }
 
         // Inventory scan mirroring BodySearchBehaviour (without StealthLevel check).
@@ -583,14 +725,14 @@ namespace K9_Patrol
                 bool invVisible = (player.IsOwner || player == Player.Local);
                 if (!invVisible)
                 {
-                    Logger.Debug($"Sniff: player {player.GetInstanceID()} inventory not visible (not local owner).");
+                    //Logger.Debug($"Sniff: player {player.GetInstanceID()} inventory not visible (not local owner).");
                     return false;
                 }
 
                 var inv = PlayerSingleton<PlayerInventory>.Instance;
                 if (inv == null || inv.hotbarSlots == null)
                 {
-                    Logger.Debug("Sniff: PlayerInventory or hotbarSlots is null.");
+                    //Logger.Debug("Sniff: PlayerInventory or hotbarSlots is null.");
                     return false;
                 }
 
@@ -604,7 +746,7 @@ namespace K9_Patrol
                     // Any product item counts (ignore packaging stealth)
                     if (item is ProductItemInstance)
                     {
-                        Logger.Debug($"Sniff: found ProductItemInstance in slot {slotIndex}.");
+                        //Logger.Debug($"Sniff: found ProductItemInstance in slot {slotIndex}.");
                         return true;
                     }
 
@@ -612,12 +754,12 @@ namespace K9_Patrol
                     var def = item.Definition;
                     if (def != null && def.legalStatus != ELegalStatus.Legal)
                     {
-                        Logger.Debug($"Sniff: found illegal item in slot {slotIndex} (status={def.legalStatus}).");
+                        //Logger.Debug($"Sniff: found illegal item in slot {slotIndex} (status={def.legalStatus}).");
                         return true;
                     }
                 }
 
-                Logger.Debug($"Sniff: no items of interest in hotbar for player {player.GetInstanceID()}.");
+                //Logger.Debug($"Sniff: no items of interest in hotbar for player {player.GetInstanceID()}.");
             }
             catch (Exception ex)
             {

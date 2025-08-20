@@ -32,5 +32,9 @@ If you run into any issues, please report them either in the modding discord or 
 - May conflict with other mods that patch police mechanics.
 
 ## Credits
-- **Source:** [GitHub](https://github.com/DropDaDeuce/K9-Patrol)  
+- **Bublisher:** For the original K9 model. You can find their work here:
+    - [Unity Asset Store](https://assetstore.unity.com/packages/3d/characters/animals/mammals/3d-stylized-animated-dogs-kit-284699)
+- **LavaGang:** For MelonLoader, which is essential for modding Schedule I.
+- **spec:** Huge input in the design of the K9 model/textures.
+- **Bars:** For helping me with shader issues!
 - **Deeej:** For providing a wonderful template: [GitHub](https://github.com/weedeej/S1MONO_IL2CPP_Template)

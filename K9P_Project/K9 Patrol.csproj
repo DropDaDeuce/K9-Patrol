@@ -943,6 +943,8 @@
 		<Folder Include="Libs\" />
 		<!--Uncomment if with assetbundle-->
 		<EmbeddedResource Include="Assets\k9model.bundle" />
+    <EmbeddedResource Include="Assets\TheyHaveDrugs.mp3" />
+    <EmbeddedResource Include="Assets\Woof.mp3" />
 	</ItemGroup>
 
 	<!--Packages-->
@@ -959,6 +961,14 @@
 	</ItemGroup>
 	<ItemGroup Condition="'$(Configuration)' == 'MONO'">
 		<Publicize Include="Assembly-CSharp:ScheduleOne.NPCs.NPC.Start" />
+	</ItemGroup>
+	<ItemGroup>
+	  <Reference Include="S1API">
+	    <HintPath>..\..\Shared_Libs\S1API\Mods\S1API.Il2Cpp.MelonLoader.dll</HintPath>
+	  </Reference>
+	  <Reference Include="S1APILoader">
+	    <HintPath>..\..\Shared_Libs\S1API\Plugins\S1APILoader.MelonLoader.dll</HintPath>
+	  </Reference>
 	</ItemGroup>
 
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
